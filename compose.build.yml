@@ -1,0 +1,26 @@
+# Build the addon from source instead of pulling the published image, which
+# does not yet include Navidrome support. Use this until a Navidrome image is
+# released.
+#
+#   mkdir -p data && sudo chown 65532 data
+#   docker compose -f compose.build.yml up -d --build
+#
+# Put the addon on the Docker network your Cloudflare tunnel (cloudflared) and
+# Navidrome already share, then point a tunnel public hostname at
+# http://bitchord-selfhosted-addon:8080. In /setup, use an address the addon
+# container can reach for Navidrome, such as its Docker service name
+# (http://navidrome:4533).
+services:
+  bitchord-selfhosted-addon:
+    build: .
+    image: bitchord-selfhosted-addon:navidrome
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: replace-with-your-cloudflared-network

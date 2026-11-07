@@ -65,12 +65,8 @@ func newStore(t *testing.T, servers ...store.Server) *store.Store {
 	return st
 }
 
-func plexServer(fake *fakes.Plex) store.Server {
-	return store.Server{Kind: store.Plex, Label: "Home", URL: fake.URL, Token: fakes.PlexToken, Auth: store.AuthToken, Library: "Music", Enabled: true}
-}
-
-func jellyfinServer(fake *fakes.Jellyfin) store.Server {
-	return store.Server{Kind: store.Jellyfin, URL: fake.URL, Token: fakes.JellyfinToken, Auth: store.AuthToken, Enabled: true}
+func navidromeServer(fake *fakes.Navidrome) store.Server {
+	return store.Server{Kind: store.Navidrome, Label: "Home", URL: fake.URL, Account: fakes.NavidromeUser, Token: fakes.NavidromePassword, Auth: store.AuthPassword, Library: "Music", Enabled: true}
 }
 
 // start runs serve in the background and returns the base URL once it listens.
@@ -183,7 +179,7 @@ func TestAnEmptyStoreServesTheSetupPageAndIsHealthy(t *testing.T) {
 	if status, _ := get(t, base+"/setup/static/style.css"); status != http.StatusOK {
 		t.Fatalf("stylesheet: %d", status)
 	}
-	if status, body := get(t, base+"/plex-1/"+st.Snapshot().Secret+"/manifest.json"); status != http.StatusNotFound || body != "" {
+	if status, body := get(t, base+"/navidrome-1/"+st.Snapshot().Secret+"/manifest.json"); status != http.StatusNotFound || body != "" {
 		t.Fatalf("unknown server: %d %q", status, body)
 	}
 	cancel()
@@ -198,24 +194,25 @@ func TestAnEmptyStoreServesTheSetupPageAndIsHealthy(t *testing.T) {
 }
 
 func TestServeAnswersEveryServerAndShutsDownOnCancel(t *testing.T) {
-	plexFake, jellyfinFake := fakes.NewPlex(t), fakes.NewJellyfin(t)
-	st := newStore(t, plexServer(plexFake), jellyfinServer(jellyfinFake))
+	first, second := fakes.NewNavidrome(t), fakes.NewNavidrome(t)
+	secondServer := navidromeServer(second)
+	secondServer.Label = ""
+	st := newStore(t, navidromeServer(first), secondServer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logs := &syncBuffer{}
 	base, done := start(ctx, t, testConfig(), st, newLogger("text", slog.LevelInfo, logs))
 	waitHealthy(t, base)
-	cases := map[string]string{"plex-1": `"id":"101"`, "jellyfin-1": `"id":"f101"`}
-	for slug, wantID := range cases {
-		if status, body := get(t, base+"/"+slug+"/"+testSecret+"/search?q=new+religion"); status != http.StatusOK || !strings.Contains(body, wantID) {
+	for _, slug := range []string{"navidrome-1", "navidrome-2"} {
+		if status, body := get(t, base+"/"+slug+"/"+testSecret+"/search?q=new+religion"); status != http.StatusOK || !strings.Contains(body, `"id":"101"`) {
 			t.Fatalf("%s search: %d %s", slug, status, body)
 		}
 		if _, body := get(t, base+"/"+slug+"/"+testSecret+"/manifest.json"); !strings.Contains(body, `"id":"app.bitchord-selfhosted-addon.`+slug+`"`) {
 			t.Fatalf("%s manifest = %s", slug, body)
 		}
 	}
-	if _, body := get(t, base+"/plex-1/"+testSecret+"/manifest.json"); !strings.Contains(body, `"name":"Plex - Home"`) {
-		t.Fatalf("plex manifest name: %s", body)
+	if _, body := get(t, base+"/navidrome-1/"+testSecret+"/manifest.json"); !strings.Contains(body, `"name":"Navidrome - Home"`) {
+		t.Fatalf("manifest name: %s", body)
 	}
 	if status, _ := get(t, base+"/setup"); status != http.StatusOK {
 		t.Fatalf("setup page alongside the servers: %d", status)
@@ -229,27 +226,31 @@ func TestServeAnswersEveryServerAndShutsDownOnCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not return after cancel")
 	}
-	for _, want := range []string{"msg=listening", "msg=\"library indexed\"", "server=plex-1", "server=jellyfin-1", "servers=2"} {
+	for _, want := range []string{"msg=listening", "msg=\"library indexed\"", "server=navidrome-1", "server=navidrome-2", "servers=2"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("logs lack %s:\n%s", want, logs.String())
 		}
 	}
-	if strings.Contains(logs.String(), fakes.PlexToken) || strings.Contains(logs.String(), testSecret) {
+	if strings.Contains(logs.String(), fakes.NavidromePassword) || strings.Contains(logs.String(), testSecret) {
 		t.Error("a credential reached the logs")
 	}
 }
 
 func TestServeStopsTheRefreshLoopBeforeShuttingDown(t *testing.T) {
-	fake := fakes.NewPlex(t)
-	sectionsBlocked := make(chan struct{})
+	fake := fakes.NewNavidrome(t)
+	searchBlocked := make(chan struct{})
 	refreshCancelledAt := make(chan time.Time, 1)
-	fake.Extra["/library/sections"] = func(w http.ResponseWriter, r *http.Request) {
-		close(sectionsBlocked)
+	var once sync.Once
+	fake.OnSearch = func(r *http.Request) {
+		once.Do(func() { close(searchBlocked) })
 		<-r.Context().Done()
-		refreshCancelledAt <- time.Now()
+		select {
+		case refreshCancelledAt <- time.Now():
+		default:
+		}
 	}
 	streamStarted := make(chan struct{})
-	fake.Extra["/library/parts/102/1/file.mp3"] = func(w http.ResponseWriter, r *http.Request) {
+	fake.Extra["stream"] = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		close(streamStarted)
 		for range 5 {
@@ -261,12 +262,12 @@ func TestServeStopsTheRefreshLoopBeforeShuttingDown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	base, done := start(ctx, t, testConfig(), newStore(t, plexServer(fake)), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	base, done := start(ctx, t, testConfig(), newStore(t, navidromeServer(fake)), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
-		res, err := http.Get(base + "/plex-1/" + testSecret + "/file/102")
+		res, err := http.Get(base + "/navidrome-1/" + testSecret + "/file/102")
 		if err != nil {
 			return
 		}
@@ -275,9 +276,9 @@ func TestServeStopsTheRefreshLoopBeforeShuttingDown(t *testing.T) {
 	}()
 
 	select {
-	case <-sectionsBlocked:
+	case <-searchBlocked:
 	case <-time.After(5 * time.Second):
-		t.Fatal("refresh never reached plex")
+		t.Fatal("refresh never reached the server")
 	}
 	select {
 	case <-streamStarted:
@@ -314,7 +315,7 @@ func TestServeStopsTheRefreshLoopBeforeShuttingDown(t *testing.T) {
 }
 
 func TestServeStopsTheRefreshLoopWhenThePortIsTaken(t *testing.T) {
-	fake := fakes.NewPlex(t)
+	fake := fakes.NewNavidrome(t)
 	taken, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +326,7 @@ func TestServeStopsTheRefreshLoopWhenThePortIsTaken(t *testing.T) {
 	done := make(chan error, 1)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	go func() {
-		done <- serve(context.Background(), cfg, newStore(t, plexServer(fake)), log, nil, func(net.Addr) {})
+		done <- serve(context.Background(), cfg, newStore(t, navidromeServer(fake)), log, nil, func(net.Addr) {})
 	}()
 
 	select {

@@ -14,19 +14,18 @@ import (
 	"time"
 
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/fakes"
-	"github.com/rairulyle/bitchord-selfhosted-addon/internal/jellyfin"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/library"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/media"
-	"github.com/rairulyle/bitchord-selfhosted-addon/internal/plex"
+	"github.com/rairulyle/bitchord-selfhosted-addon/internal/navidrome"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/registry"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/store"
 )
 
 const (
-	testSecret   = "s3cr3t-s3cr3t-s3cr3t"
-	testPublic   = "https://music.example.com"
-	testBase     = testPublic + "/plex-1/" + testSecret
-	jellyfinBase = testPublic + "/jellyfin-1/" + testSecret
+	testSecret = "s3cr3t-s3cr3t-s3cr3t"
+	testPublic = "https://music.example.com"
+	testBase   = testPublic + "/navidrome-1/" + testSecret
+	secondBase = testPublic + "/navidrome-2/" + testSecret
 )
 
 // stubRegistry holds entries built by hand, so a test decides whether an
@@ -54,16 +53,16 @@ func (s *stubRegistry) Healthy() bool {
 	return true
 }
 
-func newEntry(t *testing.T, slug string, kind store.Kind, label string, backend media.Backend, log *slog.Logger, load bool) *registry.Entry {
+func newEntry(t *testing.T, slug string, label string, backend media.Backend, log *slog.Logger, load bool) *registry.Entry {
 	t.Helper()
-	log = log.With("server", slug, "source", string(kind))
+	log = log.With("server", slug, "source", string(store.Navidrome))
 	lib := library.NewLibrary(backend, "Music", time.Hour, log)
 	if load {
 		if err := lib.Refresh(context.Background()); err != nil {
 			t.Fatalf("Refresh: %v", err)
 		}
 	}
-	return &registry.Entry{Slug: slug, Kind: kind, Label: label, Backend: backend, Library: lib, Log: log}
+	return &registry.Entry{Slug: slug, Kind: store.Navidrome, Label: label, Backend: backend, Library: lib, Log: log}
 }
 
 func newServerWith(log *slog.Logger, entries ...*registry.Entry) *server {
@@ -95,7 +94,7 @@ func (b *syncBuffer) String() string {
 }
 
 type harness struct {
-	fake    *fakes.Plex
+	fake    *fakes.Navidrome
 	entry   *registry.Entry
 	server  *server
 	handler http.Handler
@@ -103,20 +102,22 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) *harness {
-	return newHarnessWith(t, plex.Options{}, true)
+	return newHarnessWith(t, navidrome.Options{}, true)
 }
 
-func newHarnessWith(t *testing.T, options plex.Options, load bool) *harness {
+func newHarnessWith(t *testing.T, options navidrome.Options, load bool) *harness {
 	t.Helper()
-	fake := fakes.NewPlex(t)
+	fake := fakes.NewNavidrome(t)
 	options.BaseURL = fake.URL
-	if options.Token == "" {
-		options.Token = fakes.PlexToken
+	if options.Username == "" {
+		options.Username = fakes.NavidromeUser
+	}
+	if options.Password == "" {
+		options.Password = fakes.NavidromePassword
 	}
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	options.Log = log
-	entry := newEntry(t, "plex-1", store.Plex, "Home", plex.New(options), log, load)
+	entry := newEntry(t, "navidrome-1", "Home", navidrome.New(options), log, load)
 	s := newServerWith(log, entry)
 	return &harness{fake: fake, entry: entry, server: s, handler: s.handler(), logs: logs}
 }
@@ -150,87 +151,91 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 
 func TestManifest(t *testing.T) {
 	h := newHarness(t)
-	rec := h.get("/plex-1/" + testSecret + "/manifest.json")
+	rec := h.get("/navidrome-1/" + testSecret + "/manifest.json")
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("status %d, type %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
 	got := decode[map[string]any](t, rec)
 	want := map[string]any{
-		"id": "app.bitchord-selfhosted-addon.plex-1", "name": "Plex - Home", "version": "1.2.3",
-		"description": "Your Plex music library", "contentType": "music",
+		"id": "app.bitchord-selfhosted-addon.navidrome-1", "name": "Navidrome - Home", "version": "1.2.3",
+		"description": "Your Navidrome music library", "contentType": "music",
 		"resources": []any{"search", "stream"}, "types": []any{"track"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("manifest = %v", got)
 	}
 	h.entry.Label = ""
-	if got := decode[map[string]any](t, h.get("/plex-1/"+testSecret+"/manifest.json")); got["name"] != "Plex" {
+	if got := decode[map[string]any](t, h.get("/navidrome-1/"+testSecret+"/manifest.json")); got["name"] != "Navidrome" {
 		t.Errorf("name without a label = %v, want the kind alone", got["name"])
 	}
 }
 
 func TestTwoServersUnderOneSecretAnswerSeparately(t *testing.T) {
-	plexFake, jellyfinFake := fakes.NewPlex(t), fakes.NewJellyfin(t)
+	first := fakes.NewNavidrome(t)
+	second := fakes.NewNavidrome(t)
+	// Give the second server a different library so an id from one never
+	// resolves on the other.
+	second.Songs = map[string][]navidrome.Child{"1": {fakes.NavidromeSong("202", "Other Song", "Someone", "An Album")}}
+	second.Files = map[string][]byte{"202": []byte("other-bytes")}
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	plexEntry := newEntry(t, "plex-1", store.Plex, "Home", plex.New(plex.Options{BaseURL: plexFake.URL, Token: fakes.PlexToken}), log, true)
-	jellyfinEntry := newEntry(t, "jellyfin-1", store.Jellyfin, "", jellyfin.New(jellyfin.Options{BaseURL: jellyfinFake.URL, APIKey: fakes.JellyfinToken}), log, true)
-	handler := newServerWith(log, plexEntry, jellyfinEntry).handler()
-	plexManifest := decode[map[string]any](t, do(handler, http.MethodGet, "/plex-1/"+testSecret+"/manifest.json", nil))
-	jellyfinManifest := decode[map[string]any](t, do(handler, http.MethodGet, "/jellyfin-1/"+testSecret+"/manifest.json", nil))
-	if plexManifest["id"] != "app.bitchord-selfhosted-addon.plex-1" || jellyfinManifest["id"] != "app.bitchord-selfhosted-addon.jellyfin-1" || jellyfinManifest["name"] != "Jellyfin" {
-		t.Fatalf("manifests = %v, %v", plexManifest, jellyfinManifest)
+	firstEntry := newEntry(t, "navidrome-1", "Home", navidrome.New(navidrome.Options{BaseURL: first.URL, Username: fakes.NavidromeUser, Password: fakes.NavidromePassword}), log, true)
+	secondEntry := newEntry(t, "navidrome-2", "", navidrome.New(navidrome.Options{BaseURL: second.URL, Username: fakes.NavidromeUser, Password: fakes.NavidromePassword}), log, true)
+	handler := newServerWith(log, firstEntry, secondEntry).handler()
+	firstManifest := decode[map[string]any](t, do(handler, http.MethodGet, "/navidrome-1/"+testSecret+"/manifest.json", nil))
+	secondManifest := decode[map[string]any](t, do(handler, http.MethodGet, "/navidrome-2/"+testSecret+"/manifest.json", nil))
+	if firstManifest["id"] != "app.bitchord-selfhosted-addon.navidrome-1" || secondManifest["id"] != "app.bitchord-selfhosted-addon.navidrome-2" || secondManifest["name"] != "Navidrome" {
+		t.Fatalf("manifests = %v, %v", firstManifest, secondManifest)
 	}
-	if rec := do(handler, http.MethodGet, "/plex-1/"+testSecret+"/stream/101", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), testBase+"/file/101") {
-		t.Fatalf("plex stream: %d %s", rec.Code, rec.Body.String())
+	if rec := do(handler, http.MethodGet, "/navidrome-1/"+testSecret+"/stream/101", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), testBase+"/file/101") {
+		t.Fatalf("first stream: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := do(handler, http.MethodGet, "/jellyfin-1/"+testSecret+"/stream/f101", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), jellyfinBase+"/file/f101") {
-		t.Fatalf("jellyfin stream: %d %s", rec.Code, rec.Body.String())
+	if rec := do(handler, http.MethodGet, "/navidrome-2/"+testSecret+"/stream/202", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), secondBase+"/file/202") {
+		t.Fatalf("second stream: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := do(handler, http.MethodGet, "/jellyfin-1/"+testSecret+"/stream/101", nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("a plex id on the jellyfin source answered %d", rec.Code)
+	if rec := do(handler, http.MethodGet, "/navidrome-2/"+testSecret+"/stream/101", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("an id from the first source resolved on the second: %d", rec.Code)
 	}
-	if logs := logs.String(); !strings.Contains(logs, `"server":"plex-1"`) || !strings.Contains(logs, `"server":"jellyfin-1"`) {
+	if logs := logs.String(); !strings.Contains(logs, `"server":"navidrome-1"`) || !strings.Contains(logs, `"server":"navidrome-2"`) {
 		t.Fatalf("logs lack the server slugs:\n%s", logs)
 	}
 }
 
 func TestWrongSecretAndUnknownRoutesAnswerTheSameEmpty404(t *testing.T) {
 	h := newHarness(t)
-	reference := h.get("/plex-1/not-the-secret-at-all/manifest.json")
+	reference := h.get("/navidrome-1/not-the-secret-at-all/manifest.json")
 	if reference.Code != http.StatusNotFound || reference.Body.Len() != 0 {
 		t.Fatalf("wrong secret: status %d, body %q", reference.Code, reference.Body.String())
 	}
 	requests := map[string][2]string{
-		"wrong secret search":   {http.MethodGet, "/plex-1/wrong/search?q=closer"},
-		"wrong secret stream":   {http.MethodGet, "/plex-1/wrong/stream/101"},
-		"wrong secret file":     {http.MethodGet, "/plex-1/wrong/file/101"},
-		"wrong secret art":      {http.MethodGet, "/plex-1/wrong/art/101"},
-		"wrong secret options":  {http.MethodOptions, "/plex-1/wrong/search"},
-		"secret as a prefix":    {http.MethodGet, "/plex-1/" + testSecret + "x/manifest.json"},
-		"wrong slug":            {http.MethodGet, "/plex-9/" + testSecret + "/manifest.json"},
-		"slug of another kind":  {http.MethodGet, "/jellyfin-1/" + testSecret + "/manifest.json"},
+		"wrong secret search":   {http.MethodGet, "/navidrome-1/wrong/search?q=closer"},
+		"wrong secret stream":   {http.MethodGet, "/navidrome-1/wrong/stream/101"},
+		"wrong secret file":     {http.MethodGet, "/navidrome-1/wrong/file/101"},
+		"wrong secret art":      {http.MethodGet, "/navidrome-1/wrong/art/101"},
+		"wrong secret options":  {http.MethodOptions, "/navidrome-1/wrong/search"},
+		"secret as a prefix":    {http.MethodGet, "/navidrome-1/" + testSecret + "x/manifest.json"},
+		"wrong slug":            {http.MethodGet, "/navidrome-9/" + testSecret + "/manifest.json"},
+		"unknown slug":          {http.MethodGet, "/navidrome-2/" + testSecret + "/manifest.json"},
 		"reserved word as slug": {http.MethodGet, "/setup/" + testSecret + "/manifest.json"},
 		"health as slug":        {http.MethodGet, "/health/" + testSecret + "/manifest.json"},
 		"the 0.4 url shape":     {http.MethodGet, "/" + testSecret + "/manifest.json"},
-		"secret before slug":    {http.MethodGet, "/" + testSecret + "/plex-1/manifest.json"},
-		"slug alone":            {http.MethodGet, "/plex-1"},
-		"slug and secret alone": {http.MethodGet, "/plex-1/" + testSecret},
-		"unknown route":         {http.MethodGet, "/plex-1/" + testSecret + "/nope"},
-		"unknown nested route":  {http.MethodGet, "/plex-1/" + testSecret + "/search/extra"},
+		"secret before slug":    {http.MethodGet, "/" + testSecret + "/navidrome-1/manifest.json"},
+		"slug alone":            {http.MethodGet, "/navidrome-1"},
+		"slug and secret alone": {http.MethodGet, "/navidrome-1/" + testSecret},
+		"unknown route":         {http.MethodGet, "/navidrome-1/" + testSecret + "/nope"},
+		"unknown nested route":  {http.MethodGet, "/navidrome-1/" + testSecret + "/search/extra"},
 		"root":                  {http.MethodGet, "/"},
-		"wrong method":          {http.MethodPost, "/plex-1/" + testSecret + "/search"},
+		"wrong method":          {http.MethodPost, "/navidrome-1/" + testSecret + "/search"},
 		"the old healthz path":  {http.MethodGet, "/healthz"},
-		"health under secret":   {http.MethodGet, "/plex-1/" + testSecret + "/health"},
-		"track id with a slash": {http.MethodGet, "/plex-1/" + testSecret + "/stream/1%2F2"},
-		"track id with a dot":   {http.MethodGet, "/plex-1/" + testSecret + "/stream/1.2"},
-		"non hex track id":      {http.MethodGet, "/plex-1/" + testSecret + "/stream/xyz"},
-		"overlong track id":     {http.MethodGet, "/plex-1/" + testSecret + "/file/" + strings.Repeat("a", 37)},
-		"unknown track in plex": {http.MethodGet, "/plex-1/" + testSecret + "/stream/999"},
-		"double slash secret":   {http.MethodGet, "//plex-1/" + testSecret + "/manifest.json"},
-		"dot segment secret":    {http.MethodGet, "/./plex-1/" + testSecret + "/manifest.json"},
-		"dot dot secret":        {http.MethodGet, "/plex-1/" + testSecret + "/../" + testSecret + "/manifest.json"},
-		"trailing slash secret": {http.MethodGet, "/plex-1/" + testSecret + "/"},
+		"health under secret":   {http.MethodGet, "/navidrome-1/" + testSecret + "/health"},
+		"track id with a slash": {http.MethodGet, "/navidrome-1/" + testSecret + "/stream/1%2F2"},
+		"track id with a dot":   {http.MethodGet, "/navidrome-1/" + testSecret + "/stream/1.2"},
+		"overlong track id":     {http.MethodGet, "/navidrome-1/" + testSecret + "/file/" + strings.Repeat("a", 65)},
+		"unknown track":         {http.MethodGet, "/navidrome-1/" + testSecret + "/stream/999"},
+		"double slash secret":   {http.MethodGet, "//navidrome-1/" + testSecret + "/manifest.json"},
+		"dot segment secret":    {http.MethodGet, "/./navidrome-1/" + testSecret + "/manifest.json"},
+		"dot dot secret":        {http.MethodGet, "/navidrome-1/" + testSecret + "/../" + testSecret + "/manifest.json"},
+		"trailing slash secret": {http.MethodGet, "/navidrome-1/" + testSecret + "/"},
 		"double slash unknown":  {http.MethodGet, "//nope"},
 	}
 	for name, request := range requests {
@@ -248,12 +253,12 @@ func TestWrongSecretAndUnknownRoutesAnswerTheSameEmpty404(t *testing.T) {
 
 func TestCORS(t *testing.T) {
 	h := newHarness(t)
-	for _, path := range []string{"/plex-1/" + testSecret + "/manifest.json", "/plex-1/wrong/manifest.json", "/health"} {
+	for _, path := range []string{"/navidrome-1/" + testSecret + "/manifest.json", "/navidrome-1/wrong/manifest.json", "/health"} {
 		if got := h.get(path).Header().Get("Access-Control-Allow-Origin"); got != "*" {
 			t.Errorf("%s: Access-Control-Allow-Origin = %q", path, got)
 		}
 	}
-	rec := h.do(http.MethodOptions, "/plex-1/"+testSecret+"/file/101", nil)
+	rec := h.do(http.MethodOptions, "/navidrome-1/"+testSecret+"/file/101", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("preflight status = %d", rec.Code)
 	}
@@ -270,14 +275,14 @@ func TestCORS(t *testing.T) {
 
 func TestSearchMapsTracks(t *testing.T) {
 	h := newHarness(t)
-	rec := h.get("/plex-1/" + testSecret + "/search?q=New+Religion+Teddy+Swims&quality=LOW")
+	rec := h.get("/navidrome-1/" + testSecret + "/search?q=New+Religion+Teddy+Swims&quality=LOW")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	got := decode[map[string]any](t, rec)
 	want := map[string]any{
 		"tracks": []any{map[string]any{
-			"id": "101", "title": "New Religion", "artist": "All Time Low feat. Teddy Swims", "album": "Tell Me I’m Alive",
+			"id": "101", "title": "New Religion", "artist": "All Time Low, Teddy Swims", "album": "Tell Me I’m Alive",
 			"duration": float64(184), "artworkURL": testBase + "/art/101", "format": "flac", "audioQuality": "LOSSLESS",
 		}},
 		"albums": []any{}, "artists": []any{}, "playlists": []any{},
@@ -293,14 +298,14 @@ func TestSearchQualityFormatAndArtwork(t *testing.T) {
 		query, format, quality string
 		artwork                bool
 	}{
-		"mp3 falls back to album artist": {"endless slaughter limp bizkit", "mp3", "HIGH", true},
-		"pcm in wav is reported as wav":  {"closer anberlin", "wav", "LOSSLESS", true},
-		"album thumb is enough":          {"small town girl", "aac", "HIGH", true},
-		"no thumb, no artworkURL":        {"stays four the same", "mp3", "HIGH", false},
+		"mp3 is reported as mp3":      {"endless slaughter limp bizkit", "mp3", "HIGH", true},
+		"wav is reported as lossless": {"closer anberlin", "wav", "LOSSLESS", true},
+		"m4a is high quality":         {"small town girl", "m4a", "HIGH", true},
+		"no cover art, no artworkURL": {"stays four the same", "mp3", "HIGH", false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			rec := h.get("/plex-1/" + testSecret + "/search?q=" + strings.ReplaceAll(tc.query, " ", "+"))
+			rec := h.get("/navidrome-1/" + testSecret + "/search?q=" + strings.ReplaceAll(tc.query, " ", "+"))
 			tracks := decode[map[string][]map[string]any](t, rec)["tracks"]
 			if len(tracks) != 1 {
 				t.Fatalf("tracks = %v", tracks)
@@ -319,12 +324,12 @@ func TestSearchQualityFormatAndArtwork(t *testing.T) {
 func TestSearchAnswersEmptyArraysNeverNull(t *testing.T) {
 	const empty = `{"tracks":[],"albums":[],"artists":[],"playlists":[]}`
 	loaded := newHarness(t)
-	notLoaded := newHarnessWith(t, plex.Options{}, false)
+	notLoaded := newHarnessWith(t, navidrome.Options{}, false)
 	cases := map[string]*httptest.ResponseRecorder{
-		"blank query":      loaded.get("/plex-1/" + testSecret + "/search?q="),
-		"missing query":    loaded.get("/plex-1/" + testSecret + "/search"),
-		"no match":         loaded.get("/plex-1/" + testSecret + "/search?q=zzzz"),
-		"index not loaded": notLoaded.get("/plex-1/" + testSecret + "/search?q=closer"),
+		"blank query":      loaded.get("/navidrome-1/" + testSecret + "/search?q="),
+		"missing query":    loaded.get("/navidrome-1/" + testSecret + "/search"),
+		"no match":         loaded.get("/navidrome-1/" + testSecret + "/search?q=zzzz"),
+		"index not loaded": notLoaded.get("/navidrome-1/" + testSecret + "/search?q=closer"),
 	}
 	for name, rec := range cases {
 		if got := strings.TrimSpace(rec.Body.String()); rec.Code != http.StatusOK || got != empty {
@@ -334,7 +339,7 @@ func TestSearchAnswersEmptyArraysNeverNull(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	if rec := newHarnessWith(t, plex.Options{}, false).get("/health"); rec.Code != http.StatusServiceUnavailable {
+	if rec := newHarnessWith(t, navidrome.Options{}, false).get("/health"); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("before the first load: %d", rec.Code)
 	}
 	if rec := newHarness(t).get("/health"); rec.Code != http.StatusOK {
@@ -344,20 +349,20 @@ func TestHealth(t *testing.T) {
 
 func TestLogsRedactTheSecretAndNeverCarryTheToken(t *testing.T) {
 	h := newHarness(t)
-	h.get("/plex-1/" + testSecret + "/search?q=closer")
-	h.get("/plex-1/" + testSecret + "/stream/101")
+	h.get("/navidrome-1/" + testSecret + "/search?q=closer")
+	h.get("/navidrome-1/" + testSecret + "/stream/101")
 	h.get("/health")
-	h.get("//plex-1/" + testSecret + "/manifest.json")
-	h.get("/./plex-1/" + testSecret + "/search?q=closer")
+	h.get("//navidrome-1/" + testSecret + "/manifest.json")
+	h.get("/./navidrome-1/" + testSecret + "/search?q=closer")
 	h.get("/" + testSecret + "/search?q=closer")
 	h.get("/health/" + testSecret + "/manifest.json")
-	h.get("/Plex-1/" + testSecret + "/search")
+	h.get("/Navidrome-1/" + testSecret + "/search")
 	logs := h.logs.String()
-	if strings.Contains(logs, testSecret) || strings.Contains(logs, fakes.PlexToken) {
+	if strings.Contains(logs, testSecret) || strings.Contains(logs, fakes.NavidromePassword) {
 		t.Fatalf("logs leak a credential:\n%s", logs)
 	}
 	for _, want := range []string{
-		`"path":"/plex-1/***/search"`, `"path":"/plex-1/***/stream/101"`, `"path":"/***/search"`, `"path":"/health"`, `"status":200`,
+		`"path":"/navidrome-1/***/search"`, `"path":"/navidrome-1/***/stream/101"`, `"path":"/***/search"`, `"path":"/health"`, `"status":200`,
 		`"path":"/***/***/manifest.json"`, `"path":"/***/***/search"`,
 	} {
 		if !strings.Contains(logs, want) {
@@ -370,8 +375,8 @@ func TestRedact(t *testing.T) {
 	cases := map[string]string{
 		"/health": "/health", "/": "/", "/abc": "/***", "/abc/search": "/***/search", "/abc/file/12": "/***/file/12",
 		"//x/y": "/***", "/./x/y": "/***", "/x/../y": "/***", "/x/": "/***",
-		"/plex-1/abc/search": "/plex-1/***/search", "/jellyfin-2/abc/file/12": "/jellyfin-2/***/file/12",
-		"/plex-1/abc": "/plex-1/***", "/plex-1": "/***", "/setup/login": "/***/login",
+		"/navidrome-1/abc/search": "/navidrome-1/***/search", "/navidrome-2/abc/file/12": "/navidrome-2/***/file/12",
+		"/navidrome-1/abc": "/navidrome-1/***", "/navidrome-1": "/***", "/setup/login": "/***/login",
 	}
 	for in, want := range cases {
 		if got := redact(in, ""); got != want {
@@ -383,8 +388,8 @@ func TestRedact(t *testing.T) {
 	withSecret := map[string]string{
 		"/health/" + secret + "/manifest.json": "/***/***/manifest.json",
 		"/setup/" + secret + "/login":          "/***/***/login",
-		"/Plex-1/" + secret + "/search":        "/***/***/search",
-		"/plex/" + secret + "/search":          "/***/***/search",
+		"/Navidrome-1/" + secret + "/search":   "/***/***/search",
+		"/navidrome/" + secret + "/search":     "/***/***/search",
 	}
 	for in, want := range withSecret {
 		if got := redact(in, secret); got != want || strings.Contains(got, secret) {
@@ -395,13 +400,13 @@ func TestRedact(t *testing.T) {
 
 func TestSearchesAreLoggedWithTheirOutcome(t *testing.T) {
 	h := newHarness(t)
-	h.get("/plex-1/" + testSecret + "/search?q=New+Religion+Teddy+Swims")
-	h.get("/plex-1/" + testSecret + "/search?q=zzzz")
-	h.get("/plex-1/" + testSecret + "/search?q=" + strings.Repeat("a", 500))
+	h.get("/navidrome-1/" + testSecret + "/search?q=New+Religion+Teddy+Swims")
+	h.get("/navidrome-1/" + testSecret + "/search?q=zzzz")
+	h.get("/navidrome-1/" + testSecret + "/search?q=" + strings.Repeat("a", 500))
 	logs := h.logs.String()
 	for _, want := range []string{
-		`"msg":"search","server":"plex-1","source":"plex","q":"New Religion Teddy Swims","strict":1,"fallback":0,"returned":1,"top":"New Religion — All Time Low feat. Teddy Swims"`,
-		`"msg":"search miss","server":"plex-1","source":"plex","q":"zzzz","strict":0,"fallback":0,"returned":0`,
+		`"msg":"search","server":"navidrome-1","source":"navidrome","q":"New Religion Teddy Swims","strict":1,"fallback":0,"returned":1,"top":"New Religion — All Time Low, Teddy Swims"`,
+		`"msg":"search miss","server":"navidrome-1","source":"navidrome","q":"zzzz","strict":0,"fallback":0,"returned":0`,
 		`"q":"` + strings.Repeat("a", 200) + `…"`,
 	} {
 		if !strings.Contains(logs, want) {
@@ -414,12 +419,12 @@ func TestSearchesAreLoggedWithTheirOutcome(t *testing.T) {
 }
 
 func TestRequestLinesAreDebugOnly(t *testing.T) {
-	fake := fakes.NewPlex(t)
+	fake := fakes.NewNavidrome(t)
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	entry := newEntry(t, "plex-1", store.Plex, "", plex.New(plex.Options{BaseURL: fake.URL, Token: fakes.PlexToken}), log, true)
+	entry := newEntry(t, "navidrome-1", "", navidrome.New(navidrome.Options{BaseURL: fake.URL, Username: fakes.NavidromeUser, Password: fakes.NavidromePassword}), log, true)
 	handler := newServerWith(log, entry).handler()
-	req := httptest.NewRequest(http.MethodGet, "/plex-1/"+testSecret+"/manifest.json", nil)
+	req := httptest.NewRequest(http.MethodGet, "/navidrome-1/"+testSecret+"/manifest.json", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 	if strings.Contains(logs.String(), `"msg":"request"`) {
 		t.Fatalf("request line logged at info:\n%s", logs.String())

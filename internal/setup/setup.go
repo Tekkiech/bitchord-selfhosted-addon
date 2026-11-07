@@ -31,7 +31,6 @@ const (
 	maxFormBytes    = 64 << 10
 	loginAttempts   = 5
 	lockoutWindow   = time.Minute
-	tokenRefTTL     = 10 * time.Minute
 	verifyPasswords = 2
 )
 
@@ -39,12 +38,6 @@ type Runtime interface {
 	Apply(snapshot store.Snapshot)
 	Status(slug string) (registry.Status, bool)
 	Probe(ctx context.Context, server store.Server) (registry.Probe, error)
-	PlexPIN(ctx context.Context) (registry.PIN, error)
-	PlexClaim(ctx context.Context, id int) (registry.Account, bool, error)
-	PlexServers(ctx context.Context, token string) ([]registry.PlexServer, error)
-	JellyfinSignIn(ctx context.Context, serverURL, username, password string) (registry.Account, error)
-	JellyfinSignOut(ctx context.Context, serverURL, deviceID, token string) error
-	TokenInUse(slug, token string) (bool, <-chan struct{})
 }
 
 type Options struct {
@@ -53,9 +46,6 @@ type Options struct {
 	Version  string
 	Log      *slog.Logger
 	Now      func() time.Time
-	// SignOutWait caps how long a replaced Jellyfin token waits for the
-	// registry to stop using it before it is signed out.
-	SignOutWait time.Duration
 }
 
 type app struct {
@@ -63,7 +53,6 @@ type app struct {
 	pages      map[string]*template.Template
 	logins     *limiter
 	signins    *limiter
-	refs       *tokenRefs
 	verifySem  chan struct{}
 	applyMu    sync.Mutex
 	ctx        context.Context
@@ -111,15 +100,11 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	if o.SignOutWait <= 0 {
-		o.SignOutWait = signOutWait
-	}
 	a := &app{
 		Options:   o,
 		pages:     parsePages(),
 		logins:    newLimiter(o.Now, loginAttempts, lockoutWindow),
 		signins:   newLimiter(o.Now, loginAttempts, lockoutWindow),
-		refs:      newTokenRefs(o.Now, tokenRefTTL),
 		verifySem: make(chan struct{}, verifyPasswords),
 	}
 	a.ctx, a.shutdown = context.WithCancel(context.Background())
@@ -161,9 +146,6 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("POST /setup/servers/{slug}", a.updateServer)
 	mux.HandleFunc("POST /setup/servers/{slug}/delete", a.deleteServer)
 	mux.HandleFunc("POST /setup/servers/{slug}/enabled", a.setServerEnabled)
-	mux.HandleFunc("POST /setup/plex/pin", a.plexPIN)
-	mux.HandleFunc("GET /setup/plex/pin/{id}", a.plexPoll)
-	mux.HandleFunc("POST /setup/jellyfin/signin", a.jellyfinSignIn)
 	mux.HandleFunc("/setup/", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "not found", http.StatusNotFound) })
 
 	outer := http.NewServeMux()

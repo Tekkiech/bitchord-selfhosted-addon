@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/fakes"
-	"github.com/rairulyle/bitchord-selfhosted-addon/internal/plex"
+	"github.com/rairulyle/bitchord-selfhosted-addon/internal/navidrome"
 )
 
 const flacBody = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-func filePath(id string) string { return "/plex-1/" + testSecret + "/file/" + id }
+func filePath(id string) string { return "/navidrome-1/" + testSecret + "/file/" + id }
 
 func TestFileWithoutRange(t *testing.T) {
 	rec := newHarness(t).get(filePath("101"))
@@ -76,23 +76,23 @@ func TestFileForwardsOnlyWhitelistedHeaders(t *testing.T) {
 		t.Errorf("range headers not forwarded: %v", upstream)
 	}
 	if upstream.Get("Cookie") != "" || upstream.Get("Authorization") != "" {
-		t.Errorf("private request headers reached Plex: %v", upstream)
+		t.Errorf("private request headers reached Navidrome: %v", upstream)
 	}
 	if upstream.Get("Accept-Encoding") != "identity" {
 		t.Errorf("Accept-Encoding = %q", upstream.Get("Accept-Encoding"))
 	}
-	if rec.Header().Get("X-Plex-Protocol") != "" {
-		t.Error("a Plex response header outside the whitelist reached the client")
+	if rec.Header().Get("X-Navidrome-Fake") != "" {
+		t.Error("a Navidrome response header outside the whitelist reached the client")
 	}
 	for name, values := range rec.Header() {
-		if strings.Contains(strings.Join(values, ","), fakes.PlexToken) {
-			t.Errorf("token leaked in response header %s", name)
+		if strings.Contains(strings.Join(values, ","), fakes.NavidromePassword) {
+			t.Errorf("password leaked in response header %s", name)
 		}
 	}
 }
 
-func TestFileFallsBackToPlexOnAnIndexMiss(t *testing.T) {
-	h := newHarnessWith(t, plex.Options{}, false)
+func TestFileFallsBackToTheServerOnAnIndexMiss(t *testing.T) {
+	h := newHarnessWith(t, navidrome.Options{}, false)
 	if rec := h.get(filePath("101")); rec.Code != http.StatusOK || rec.Body.String() != flacBody {
 		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
 	}
@@ -100,35 +100,35 @@ func TestFileFallsBackToPlexOnAnIndexMiss(t *testing.T) {
 
 func TestFileMissesAndFailures(t *testing.T) {
 	h := newHarness(t)
-	for name, id := range map[string]string{"unknown id": "999", "file gone from plex": "103", "malformed id": "1x", "track without media": "106"} {
+	for name, id := range map[string]string{"unknown id": "999", "file gone from the server": "103", "unknown short id": "1x", "nonexistent track": "106"} {
 		if rec := h.get(filePath(id)); rec.Code != http.StatusNotFound || rec.Body.Len() != 0 {
 			t.Errorf("%s: status %d", name, rec.Code)
 		}
 	}
 	h.fake.FailWith(http.StatusInternalServerError)
 	if rec := h.get(filePath("101")); rec.Code != http.StatusBadGateway {
-		t.Errorf("plex 500: status %d", rec.Code)
+		t.Errorf("server 500: status %d", rec.Code)
 	}
-	if logs := h.logs.String(); !strings.Contains(logs, `"msg":"upstream answered the byte request badly","server":"plex-1","source":"plex","status":500`) {
+	if logs := h.logs.String(); !strings.Contains(logs, `"msg":"upstream answered the byte request badly","server":"navidrome-1","source":"navidrome","status":500`) {
 		t.Errorf("logs lack the bad-answer line:\n%s", logs)
 	}
 }
 
-func TestFileAnswers502AndNamesTheVariableWhenTheTokenIsRejected(t *testing.T) {
-	h := newHarnessWith(t, plex.Options{Token: "wrong"}, false)
+func TestFileAnswers502WhenTheCredentialsAreRejected(t *testing.T) {
+	h := newHarnessWith(t, navidrome.Options{Password: "wrong"}, false)
 	rec := h.get(filePath("101"))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if logs := h.logs.String(); !strings.Contains(logs, "the Plex token") || strings.Contains(logs, fakes.PlexToken) {
+	if logs := h.logs.String(); !strings.Contains(logs, "navidrome rejected the username or password") {
 		t.Fatalf("logs = %s", logs)
 	}
 }
 
-func TestClientDisconnectCancelsThePlexRequest(t *testing.T) {
+func TestClientDisconnectCancelsTheUpstreamRequest(t *testing.T) {
 	h := newHarness(t)
 	cancelled := make(chan struct{})
-	h.fake.Extra["/library/parts/102/1/file.mp3"] = func(w http.ResponseWriter, r *http.Request) {
+	h.fake.Extra["stream"] = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		for {
 			select {
@@ -160,15 +160,15 @@ func TestClientDisconnectCancelsThePlexRequest(t *testing.T) {
 	select {
 	case <-cancelled:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Plex request was still running 5s after the client left")
+		t.Fatal("upstream request was still running 5s after the client left")
 	}
 }
 
-func TestClientDisconnectBeforePlexAnswersCancelsThePlexRequest(t *testing.T) {
+func TestClientDisconnectBeforeTheServerAnswersCancelsTheUpstreamRequest(t *testing.T) {
 	h := newHarness(t)
 	reached := make(chan struct{})
 	cancelled := make(chan struct{})
-	h.fake.Extra["/library/parts/102/1/file.mp3"] = func(w http.ResponseWriter, r *http.Request) {
+	h.fake.Extra["stream"] = func(w http.ResponseWriter, r *http.Request) {
 		close(reached)
 		<-r.Context().Done()
 		close(cancelled)
@@ -185,14 +185,14 @@ func TestClientDisconnectBeforePlexAnswersCancelsThePlexRequest(t *testing.T) {
 	select {
 	case <-cancelled:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Plex request was still running 5s after the client left")
+		t.Fatal("upstream request was still running 5s after the client left")
 	}
 }
 
 func TestABodyLongerThanEveryTimeoutStillCompletes(t *testing.T) {
-	h := newHarnessWith(t, plex.Options{HeaderTimeout: 50 * time.Millisecond, CallTimeout: 50 * time.Millisecond}, true)
+	h := newHarnessWith(t, navidrome.Options{HeaderTimeout: 50 * time.Millisecond, CallTimeout: 50 * time.Millisecond}, true)
 	h.server.lookupTimeout = 50 * time.Millisecond
-	h.fake.Extra["/library/parts/102/1/file.mp3"] = func(w http.ResponseWriter, r *http.Request) {
+	h.fake.Extra["stream"] = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		for range 6 {
 			w.Write([]byte("slow!"))
@@ -215,7 +215,7 @@ func TestABodyLongerThanEveryTimeoutStillCompletes(t *testing.T) {
 
 func TestStreamEndingEarlyIsLoggedAtDebugNotAboveIt(t *testing.T) {
 	h := newHarness(t)
-	h.fake.Extra["/library/parts/102/1/file.mp3"] = func(w http.ResponseWriter, r *http.Request) {
+	h.fake.Extra["stream"] = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "100")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("short"))
@@ -245,8 +245,8 @@ func TestStreamEndingEarlyIsLoggedAtDebugNotAboveIt(t *testing.T) {
 
 func TestArt(t *testing.T) {
 	h := newHarness(t)
-	rec := h.get("/plex-1/" + testSecret + "/art/101")
-	if rec.Code != http.StatusOK || rec.Body.String() != "jpeg:/library/metadata/101/thumb/1" {
+	rec := h.get("/navidrome-1/" + testSecret + "/art/101")
+	if rec.Code != http.StatusOK || rec.Body.String() != "jpeg:101" {
 		t.Fatalf("status %d, body %q", rec.Code, rec.Body.String())
 	}
 	if rec.Header().Get("Content-Type") != "image/jpeg" || rec.Header().Get("Cache-Control") != "public, max-age=86400" {
@@ -254,29 +254,26 @@ func TestArt(t *testing.T) {
 	}
 	requests := h.fake.Requests()
 	last := requests[len(requests)-1]
-	if last.Path != "/photo/:/transcode" || !strings.Contains(last.Query, "width=600&height=600") {
+	if last.Path != "/rest/getCoverArt.view" || !strings.Contains(last.Query, "id=art-101") || !strings.Contains(last.Query, "size=600") {
 		t.Errorf("upstream = %s?%s", last.Path, last.Query)
 	}
-	if strings.Contains(last.Query, fakes.PlexToken) {
-		t.Error("token leaked into the artwork URL")
+	if strings.Contains(last.Query, "p=") || strings.Contains(last.Query, fakes.NavidromePassword) {
+		t.Error("the plaintext password reached the artwork URL")
 	}
 }
 
-func TestArtFallbacksAndMisses(t *testing.T) {
+func TestArtMisses(t *testing.T) {
 	h := newHarness(t)
-	if rec := h.get("/plex-1/" + testSecret + "/art/105"); rec.Body.String() != "jpeg:/library/metadata/9105/thumb/1" {
-		t.Errorf("album thumb fallback: %q", rec.Body.String())
-	}
-	for name, id := range map[string]string{"track without any thumb": "104", "unknown id": "999"} {
-		if rec := h.get("/plex-1/" + testSecret + "/art/" + id); rec.Code != http.StatusNotFound {
+	for name, id := range map[string]string{"track without cover art": "104", "unknown id": "999"} {
+		if rec := h.get("/navidrome-1/" + testSecret + "/art/" + id); rec.Code != http.StatusNotFound {
 			t.Errorf("%s: status %d", name, rec.Code)
 		}
 	}
-	cold := newHarnessWith(t, plex.Options{}, false)
-	if rec := cold.get("/plex-1/" + testSecret + "/art/101"); rec.Code != http.StatusOK {
+	cold := newHarnessWith(t, navidrome.Options{}, false)
+	if rec := cold.get("/navidrome-1/" + testSecret + "/art/101"); rec.Code != http.StatusOK {
 		t.Errorf("index miss: status %d", rec.Code)
 	}
-	head := h.do(http.MethodHead, "/plex-1/"+testSecret+"/art/101", nil)
+	head := h.do(http.MethodHead, "/navidrome-1/"+testSecret+"/art/101", nil)
 	if head.Code != http.StatusOK || head.Body.Len() != 0 {
 		t.Errorf("HEAD: status %d, body %q", head.Code, head.Body.String())
 	}
@@ -289,9 +286,9 @@ func TestPlaysAreLogged(t *testing.T) {
 	h.do(http.MethodHead, filePath("101"), nil)
 	logs := h.logs.String()
 	for _, want := range []string{
-		`"level":"INFO","msg":"play","server":"plex-1","source":"plex","id":"101","track":"New Religion — All Time Low feat. Teddy Swims","range":"","status":200,"bytes":36,"ended":"complete"`,
-		`"msg":"play","server":"plex-1","source":"plex","id":"101","track":"New Religion — All Time Low feat. Teddy Swims","range":"bytes=10-19","status":206,"bytes":10,"ended":"complete"`,
-		`"level":"DEBUG","msg":"probe","server":"plex-1","source":"plex","id":"101"`,
+		`"level":"INFO","msg":"play","server":"navidrome-1","source":"navidrome","id":"101","track":"New Religion — All Time Low, Teddy Swims","range":"","status":200,"bytes":36,"ended":"complete"`,
+		`"msg":"play","server":"navidrome-1","source":"navidrome","id":"101","track":"New Religion — All Time Low, Teddy Swims","range":"bytes=10-19","status":206,"bytes":10,"ended":"complete"`,
+		`"level":"DEBUG","msg":"probe","server":"navidrome-1","source":"navidrome","id":"101"`,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("logs lack %s:\n%s", want, logs)
@@ -301,7 +298,7 @@ func TestPlaysAreLogged(t *testing.T) {
 
 func TestAPlayTheClientAbandonsIsLoggedAsSuch(t *testing.T) {
 	h := newHarness(t)
-	h.fake.Extra["/library/parts/102/1/file.mp3"] = func(w http.ResponseWriter, r *http.Request) {
+	h.fake.Extra["stream"] = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		for r.Context().Err() == nil {
 			w.Write([]byte("chunk"))

@@ -7,15 +7,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
-	"github.com/rairulyle/bitchord-selfhosted-addon/internal/jellyfin"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/library"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/media"
-	"github.com/rairulyle/bitchord-selfhosted-addon/internal/plex"
+	"github.com/rairulyle/bitchord-selfhosted-addon/internal/navidrome"
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/store"
 )
 
@@ -23,8 +21,6 @@ type Options struct {
 	Interval     time.Duration
 	Version      string
 	Log          *slog.Logger
-	PlexTV       string
-	HTTP         *http.Client
 	ProbeTimeout time.Duration
 	// HandoverTimeout caps how long a changed server keeps answering from
 	// its old entry while the new one loads its first index.
@@ -44,7 +40,8 @@ type Entry struct {
 	done    chan struct{}
 }
 
-// DisplayName is what BitChord shows: "Plex - Home", or "Plex" with no label.
+// DisplayName is what BitChord shows: "Navidrome - Home", or "Navidrome" with
+// no label.
 func (e *Entry) DisplayName() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -87,18 +84,6 @@ func (h *handover) cancel() {
 	h.next.stop()
 }
 
-// TokenInUse reports whether the running or the starting entry for slug
-// sends token, and returns a channel closed at the registry's next change, so
-// a caller can wait and ask again without missing one.
-func (r *Registry) TokenInUse(slug, token string) (bool, <-chan struct{}) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	entry, running := r.entries[slug]
-	pending, starting := r.pending[slug]
-	used := running && entry.config.Token == token || starting && pending.next.config.Token == token
-	return used, r.changed
-}
-
 func (r *Registry) announceChange() {
 	close(r.changed)
 	r.changed = make(chan struct{})
@@ -124,14 +109,8 @@ func New(snapshot store.Snapshot, o Options) *Registry {
 
 func NewBackend(server store.Server, clientID, version string, log *slog.Logger) (media.Backend, error) {
 	switch server.Kind {
-	case store.Plex:
-		return plex.New(plex.Options{BaseURL: server.URL, Token: server.Token, ClientID: clientID, Log: log}), nil
-	case store.Jellyfin:
-		deviceID := server.DeviceID
-		if deviceID == "" {
-			deviceID = clientID
-		}
-		return jellyfin.New(jellyfin.Options{BaseURL: server.URL, APIKey: server.Token, DeviceID: deviceID, Version: version}), nil
+	case store.Navidrome:
+		return navidrome.New(navidrome.Options{BaseURL: server.URL, Username: server.Account, Password: server.Token}), nil
 	default:
 		return nil, fmt.Errorf("unknown server kind %q", server.Kind)
 	}
@@ -260,7 +239,7 @@ func (e *Entry) setLabel(label string) {
 }
 
 func sameConnection(a, b store.Server) bool {
-	return a.Kind == b.Kind && a.URL == b.URL && a.Token == b.Token && a.DeviceID == b.DeviceID && a.Library == b.Library
+	return a.Kind == b.Kind && a.URL == b.URL && a.Account == b.Account && a.Token == b.Token && a.Library == b.Library
 }
 
 func (r *Registry) start(server store.Server) (*Entry, error) {

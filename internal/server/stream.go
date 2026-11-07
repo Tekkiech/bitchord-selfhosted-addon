@@ -9,7 +9,9 @@ import (
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/media"
 )
 
-var idPattern = regexp.MustCompile(`^[0-9a-fA-F-]{1,36}$`)
+// Navidrome track ids are opaque Subsonic strings: hex, UUIDs, or other
+// alphanumerics, so the pattern stays permissive while rejecting path tricks.
+var idPattern = regexp.MustCompile(`^[0-9a-zA-Z_-]{1,64}$`)
 
 func trackID(r *http.Request) (string, bool) {
 	id := r.PathValue("id")

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,11 +16,7 @@ import (
 	"github.com/rairulyle/bitchord-selfhosted-addon/internal/store"
 )
 
-const (
-	probeTimeout   = 15 * time.Second
-	signOutTimeout = 3 * time.Second
-	signOutWait    = time.Minute
-)
+const probeTimeout = 15 * time.Second
 
 func (a *app) render(w http.ResponseWriter, r *http.Request, status int, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -213,24 +208,24 @@ func (a *app) editServerForm(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, http.StatusOK, "server", view)
 }
 
-// submitted is what the form posts, before any of it has been checked.
+// submitted is what the form posts, before any of it has been checked. The
+// password is sent in the "password" field; it is left empty on an edit to
+// keep the stored one.
 type submitted struct {
-	kind     store.Kind
 	label    string
 	url      string
-	token    string
-	tokenRef string
+	username string
+	password string
 	library  string
 	enabled  bool
 }
 
 func readSubmitted(r *http.Request) submitted {
 	return submitted{
-		kind:     store.Kind(r.PostFormValue("kind")),
 		label:    strings.TrimSpace(r.PostFormValue("label")),
 		url:      strings.TrimRight(strings.TrimSpace(r.PostFormValue("url")), "/"),
-		token:    strings.TrimSpace(r.PostFormValue("token")),
-		tokenRef: r.PostFormValue("token_ref"),
+		username: strings.TrimSpace(r.PostFormValue("username")),
+		password: r.PostFormValue("password"),
 		library:  r.PostFormValue("library"),
 		enabled:  r.PostFormValue("enabled") != "",
 	}
@@ -239,19 +234,18 @@ func readSubmitted(r *http.Request) submitted {
 func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 	form := readSubmitted(r)
 	view := a.formView(r, "Add a server")
-	server, giveBack, err := a.resolveServer(r.Context(), form, store.Server{Kind: form.kind})
+	server, err := a.resolveServer(r.Context(), form, store.Server{Kind: store.Navidrome})
 	if err != nil {
 		a.renderServerError(w, r, view, form, err)
 		return
 	}
 	added, err := a.Store.AddServer(server)
 	if err != nil {
-		giveBack()
 		a.renderServerError(w, r, view, form, err)
 		return
 	}
 	a.apply()
-	a.Log.Info("server added", "server", added.Slug, "source", string(added.Kind), "host", hostOf(added.URL), "auth", string(added.Auth))
+	a.Log.Info("server added", "server", added.Slug, "source", string(added.Kind), "host", hostOf(added.URL), "username", added.Account)
 	redirectNotice(w, r, registry.DisplayName(kindName(added.Kind), added.Label)+" added. Copy its URL into BitChord.")
 }
 
@@ -263,13 +257,12 @@ func (a *app) updateServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	form := readSubmitted(r)
-	form.kind = existing.Kind
 	view := a.formView(r, "Edit "+registry.DisplayName(kindName(existing.Kind), existing.Label))
-	view.Editing, view.Slug, view.Action, view.Account = true, slug, "/setup/servers/"+slug, existing.Account
+	view.Editing, view.Slug, view.Action = true, slug, "/setup/servers/"+slug
 	if form.library == existing.Library {
 		view.LibraryName = existing.LibraryName
 	}
-	server, giveBack, err := a.resolveServer(r.Context(), form, existing)
+	server, err := a.resolveServer(r.Context(), form, existing)
 	if err != nil {
 		a.renderServerError(w, r, view, form, err)
 		return
@@ -279,60 +272,44 @@ func (a *app) updateServer(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		giveBack()
 		a.renderServerError(w, r, view, form, err)
 		return
 	}
 	a.apply()
-	a.Log.Info("server updated", "server", slug, "source", string(server.Kind), "host", hostOf(server.URL), "auth", string(server.Auth))
-	a.signOutReplaced(existing, server)
+	a.Log.Info("server updated", "server", slug, "source", string(server.Kind), "host", hostOf(server.URL), "username", server.Account)
 	redirectNotice(w, r, registry.DisplayName(kindName(server.Kind), server.Label)+" saved.")
 }
 
-// resolveServer turns a submitted form into a validated server: it settles
-// which credential applies, probes the server with it, and checks the
-// library against what the server listed. A sign-in reference is taken at
-// once, so two saves cannot both use it, and given back if anything fails;
-// giveBack does the same for a failure after it returns.
-func (a *app) resolveServer(ctx context.Context, form submitted, existing store.Server) (server store.Server, giveBack func(), err error) {
-	giveBack = func() {}
-	defer func() {
-		if err != nil {
-			giveBack()
-		}
-	}()
-	server = existing
-	server.Label, server.URL, server.Enabled = form.label, form.url, form.enabled
-	if err = store.ValidateServerURL(server.URL); err != nil {
-		return server, giveBack, err
+// resolveServer turns a submitted form into a validated server: it settles the
+// username and password, probes the server with them, and checks the library
+// against what the server listed. An empty password on an edit keeps the
+// stored one.
+func (a *app) resolveServer(ctx context.Context, form submitted, existing store.Server) (store.Server, error) {
+	server := existing
+	server.Kind, server.Auth = store.Navidrome, store.AuthPassword
+	server.Label, server.URL, server.Account, server.Enabled = form.label, form.url, form.username, form.enabled
+	if err := store.ValidateServerURL(server.URL); err != nil {
+		return server, err
 	}
 	if utf8.RuneCountInString(server.Label) > store.LabelMaxLength {
-		return server, giveBack, fmt.Errorf("the label must be at most %d characters", store.LabelMaxLength)
+		return server, fmt.Errorf("the label must be at most %d characters", store.LabelMaxLength)
+	}
+	if server.Account == "" {
+		return server, errors.New("a username is required")
 	}
 	switch {
-	case form.tokenRef != "":
-		pending, ok := a.refs.take(form.tokenRef)
-		if !ok {
-			return server, giveBack, errors.New("the sign-in has expired, sign in again")
-		}
-		giveBack = func() { a.refs.restore(form.tokenRef, pending) }
-		if pending.kind != server.Kind {
-			return server, giveBack, fmt.Errorf("the sign-in belongs to %s, not %s; sign in again", kindName(pending.kind), kindName(server.Kind))
-		}
-		server.Token, server.Account, server.DeviceID = pending.token, pending.account, pending.deviceID
-		server.Auth = map[store.Kind]store.Auth{store.Plex: store.AuthPlexSignIn, store.Jellyfin: store.AuthJellyfinSignIn}[server.Kind]
-	case form.token != "":
-		server.Token, server.Account, server.DeviceID, server.Auth = form.token, "", "", store.AuthToken
-	case existing.Token == "":
-		return server, giveBack, errors.New("sign in or paste a token")
-	case existing.Auth == store.AuthJellyfinSignIn && existing.URL != server.URL:
-		return server, giveBack, errors.New("the Jellyfin sign-in belongs to the old address, sign in again")
+	case form.password != "":
+		server.Token = form.password
+	case existing.Token != "":
+		// Keep the stored password.
+	default:
+		return server, errors.New("a password is required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	probe, err := a.Registry.Probe(ctx, server)
 	if err != nil {
-		return server, giveBack, describe(err)
+		return server, describe(err)
 	}
 	server.Library, server.LibraryName = "", ""
 	if form.library != "" {
@@ -343,21 +320,21 @@ func (a *app) resolveServer(ctx context.Context, form submitted, existing store.
 			}
 		}
 		if !match {
-			return server, giveBack, errors.New("the server has no music library with that name")
+			return server, errors.New("the server has no music library with that name")
 		}
 	}
-	return server, giveBack, nil
+	return server, nil
 }
 
 func (a *app) renderServerError(w http.ResponseWriter, r *http.Request, view serverFormView, form submitted, err error) {
 	view.Error = err.Error()
-	view.Kind, view.KindName, view.Label, view.URL, view.Library, view.Enabled = form.kind, kindName(form.kind), form.label, form.url, form.library, form.enabled
+	view.Kind, view.KindName = store.Navidrome, kindName(store.Navidrome)
+	view.Label, view.URL, view.Account, view.Library, view.Enabled = form.label, form.url, form.username, form.library, form.enabled
 	a.render(w, r, http.StatusBadRequest, "server", view)
 }
 
 func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
-	existing, _ := a.Store.Snapshot().Server(slug)
 	err := a.Store.RemoveServer(slug)
 	switch {
 	case errors.Is(err, store.ErrNoServer):
@@ -369,7 +346,6 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	}
 	a.apply()
 	a.Log.Info("server removed", "server", slug)
-	a.signOutReplaced(existing, store.Server{})
 	redirectNotice(w, r, slug+" removed. Its URL no longer answers.")
 }
 
@@ -396,15 +372,15 @@ func (a *app) setServerEnabled(w http.ResponseWriter, r *http.Request) {
 // ---- JSON endpoints used by the form's buttons
 
 type testRequest struct {
-	Kind     store.Kind `json:"kind"`
-	URL      string     `json:"url"`
-	Token    string     `json:"token"`
-	TokenRef string     `json:"token_ref"`
-	Slug     string     `json:"slug"`
+	URL      string `json:"url"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Slug     string `json:"slug"`
 }
 
-// testServer probes with the referenced sign-in, the pasted token, or the
-// stored token of the server being edited, in that order, as a save would.
+// testServer probes with the typed username and password, falling back to the
+// stored password of the server being edited when the password is left empty,
+// as a save would.
 func (a *app) testServer(w http.ResponseWriter, r *http.Request) {
 	var req testRequest
 	if err := readJSON(r, &req); err != nil {
@@ -416,38 +392,37 @@ func (a *app) testServer(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	server := store.Server{Kind: req.Kind, URL: req.URL, Token: strings.TrimSpace(req.Token)}
-	switch {
-	case req.TokenRef != "":
-		pending, ok := a.refs.peek(req.TokenRef)
-		switch {
-		case !ok:
-			jsonError(w, http.StatusBadRequest, "the sign-in has expired, sign in again")
-			return
-		case pending.kind != req.Kind:
-			jsonError(w, http.StatusBadRequest, fmt.Sprintf("the sign-in belongs to %s, not %s; sign in again", kindName(pending.kind), kindName(req.Kind)))
-			return
+	server := store.Server{Kind: store.Navidrome, URL: req.URL, Account: strings.TrimSpace(req.Username), Token: req.Password, Auth: store.AuthPassword}
+	if req.Password == "" && req.Slug != "" {
+		if existing, ok := a.Store.Snapshot().Server(req.Slug); ok {
+			server.Token = existing.Token
+			if server.Account == "" {
+				server.Account = existing.Account
+			}
 		}
-		server.Token, server.DeviceID = pending.token, pending.deviceID
-	case server.Token != "":
-	case req.Slug != "":
-		existing, ok := a.Store.Snapshot().Server(req.Slug)
-		if !ok {
-			jsonError(w, http.StatusBadRequest, "unknown server")
-			return
-		}
-		server.Kind, server.Token, server.DeviceID = existing.Kind, existing.Token, existing.DeviceID
-	default:
-		jsonError(w, http.StatusBadRequest, "sign in or paste a token first")
+	}
+	if server.Account == "" || server.Token == "" {
+		jsonError(w, http.StatusBadRequest, "enter a username and password first")
+		return
+	}
+	if !a.signins.attempt(req.URL) {
+		jsonError(w, http.StatusTooManyRequests, "too many failed tests for this server, try again in a minute")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
 	defer cancel()
 	probe, err := a.Registry.Probe(ctx, server)
-	if err != nil {
+	switch {
+	case errors.Is(err, media.ErrUnauthorized):
+		a.Log.Warn("navidrome test rejected", "host", hostOf(req.URL), "username", server.Account)
+		jsonError(w, http.StatusUnauthorized, describe(err).Error())
+		return
+	case err != nil:
+		a.signins.forgive(req.URL)
 		jsonError(w, http.StatusBadGateway, describe(err).Error())
 		return
 	}
+	a.signins.reset(req.URL)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": probe.Version, "libraries": libraryList(probe.Libraries)})
 }
 
@@ -457,133 +432,6 @@ func libraryList(libraries []media.Library) []map[string]string {
 		out[i] = map[string]string{"id": library.ID, "name": library.Name}
 	}
 	return out
-}
-
-func (a *app) plexPIN(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
-	defer cancel()
-	pin, err := a.Registry.PlexPIN(ctx)
-	if err != nil {
-		jsonError(w, http.StatusBadGateway, "cannot reach plex.tv from the addon; paste a token instead")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": pin.ID, "auth_url": pin.AuthURL})
-}
-
-// plexPoll answers claimed=false until the user signs in on app.plex.tv. The
-// token never reaches the browser: the answer carries a one-time reference.
-func (a *app) plexPoll(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "malformed pin id")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
-	defer cancel()
-	account, claimed, err := a.Registry.PlexClaim(ctx, id)
-	switch {
-	case errors.Is(err, media.ErrNotFound):
-		jsonError(w, http.StatusGone, "the sign-in expired, start over")
-		return
-	case err != nil:
-		jsonError(w, http.StatusBadGateway, "cannot reach plex.tv from the addon; paste a token instead")
-		return
-	case !claimed:
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "claimed": false})
-		return
-	}
-	servers, err := a.Registry.PlexServers(ctx, account.Token)
-	if err != nil {
-		jsonError(w, http.StatusBadGateway, "signed in, but the server list could not be read: "+describe(err).Error())
-		return
-	}
-	list := make([]map[string]any, len(servers))
-	for i, server := range servers {
-		list[i] = map[string]any{"name": server.Name, "url": server.URL, "reachable": server.Reachable}
-	}
-	ref := a.refs.put(store.Plex, account.Token, account.Username, "")
-	a.Log.Info("plex sign-in completed", "account", account.Username)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "claimed": true, "username": account.Username, "ref": ref, "servers": list})
-}
-
-type jellyfinSignInRequest struct {
-	URL      string `json:"url"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-func (a *app) jellyfinSignIn(w http.ResponseWriter, r *http.Request) {
-	var req jellyfinSignInRequest
-	if err := readJSON(r, &req); err != nil {
-		jsonError(w, http.StatusBadRequest, "malformed request")
-		return
-	}
-	req.URL = strings.TrimRight(strings.TrimSpace(req.URL), "/")
-	if err := store.ValidateServerURL(req.URL); err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if !a.signins.attempt(req.URL) {
-		jsonError(w, http.StatusTooManyRequests, "too many failed sign-ins for this server, try again in a minute")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
-	defer cancel()
-	account, err := a.Registry.JellyfinSignIn(ctx, req.URL, req.Username, req.Password)
-	switch {
-	case errors.Is(err, media.ErrUnauthorized):
-		a.Log.Warn("jellyfin sign-in rejected", "host", hostOf(req.URL), "username", req.Username)
-		jsonError(w, http.StatusUnauthorized, "jellyfin rejected the sign-in")
-		return
-	case err != nil:
-		a.signins.forgive(req.URL)
-		jsonError(w, http.StatusBadGateway, describe(err).Error())
-		return
-	}
-	a.signins.reset(req.URL)
-	ref := a.refs.put(store.Jellyfin, account.Token, account.Username, account.DeviceID)
-	a.Log.Info("jellyfin sign-in completed", "host", hostOf(req.URL), "username", account.Username)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": account.Username, "ref": ref})
-}
-
-// signOutReplaced revokes the token a Jellyfin sign-in replaced, or the token
-// of a removed server, so the old session does not linger in Jellyfin. A
-// pasted API key is left alone: the
-// user made it by hand. It waits in the background until no running or
-// starting entry for the server sends the old token any more, and leaves the
-// session alone if one still does when the wait ends. It never fails the
-// save.
-func (a *app) signOutReplaced(old, saved store.Server) {
-	if old.Kind != store.Jellyfin || old.Auth != store.AuthJellyfinSignIn || old.Token == saved.Token {
-		return
-	}
-	if !a.goBackground(func() { a.signOutWhenUnused(old) }) {
-		a.Log.Info("old jellyfin session left signed in", "server", old.Slug, "host", hostOf(old.URL))
-	}
-}
-
-func (a *app) signOutWhenUnused(old store.Server) {
-	timer := time.NewTimer(a.SignOutWait)
-	defer timer.Stop()
-	used, changed := a.Registry.TokenInUse(old.Slug, old.Token)
-	for waiting := true; used && waiting; used, changed = a.Registry.TokenInUse(old.Slug, old.Token) {
-		select {
-		case <-changed:
-		case <-timer.C:
-			waiting = false
-		case <-a.ctx.Done():
-			waiting = false
-		}
-	}
-	if used {
-		a.Log.Info("old jellyfin session left signed in", "server", old.Slug, "host", hostOf(old.URL))
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(a.ctx), signOutTimeout)
-	defer cancel()
-	if err := a.Registry.JellyfinSignOut(ctx, old.URL, old.DeviceID, old.Token); err != nil {
-		a.Log.Warn("old jellyfin session not signed out", "server", old.Slug, "host", hostOf(old.URL))
-	}
 }
 
 // describe turns an adapter error into a sentence for the page.

@@ -1,7 +1,7 @@
 <h1 align="center">bitchord-selfhosted-addon</h1>
 
 <p align="center">
-  Play your own Plex and Jellyfin music libraries inside BitChord.
+  Play your own Navidrome music library inside BitChord.
 </p>
 
 <div align="center">
@@ -10,29 +10,32 @@
 
 ## 🎵 What it is
 
-A small self-hosted server that adds your Plex and Jellyfin music libraries
-to BitChord (Android) as sources. BitChord searches your library through the
-addon and streams your original files.
+A small self-hosted server that adds your Navidrome music library to BitChord
+(Android) as a source. BitChord searches your library through the addon and
+streams your original files. It talks to Navidrome over the Subsonic API, so
+any Subsonic-compatible server should work too.
 
 BitChord prefers addons you add over its built-in sources, so when a song is
 in your library, your own copy plays.
 
 > [!IMPORTANT]
-> **You need your own Plex or Jellyfin server with your own music on it.**
+> **You need your own Navidrome server with your own music on it.**
 > This addon adds no music and is not a streaming service. If you don't run
-> Plex or Jellyfin, it has nothing to play, so you don't need it.
+> Navidrome, it has nothing to play, so you don't need it.
 
 ## ✨ Features
 
 - **Set up in the browser.** Open `/setup`, choose a password, add your
-  servers, and copy each one's link into BitChord.
-- **Any number of servers.** Each Plex or Jellyfin server gets its own link
-  and shows up in BitChord as its own source.
+  server, and copy its link into BitChord.
+- **Any number of servers.** Each Navidrome server gets its own link and shows
+  up in BitChord as its own source.
 - **Fast search.** The addon keeps a list of your tracks in memory, about
   30–50 MB for 100,000 tracks.
-- **Original quality.** Your files are streamed as they are, with seeking.
-- **Private.** Your Plex and Jellyfin tokens never leave the addon, and every
-  link contains a secret.
+- **Original quality.** Your files are streamed as they are (`format=raw`),
+  with seeking.
+- **Private.** Your Navidrome password never leaves the addon — only a salted
+  token derived from it is sent on each request — and every link contains a
+  secret.
 
 <p align="center">
   <img src="docs/screenshots/setup.png" alt="The setup page listing three servers" width="49%">
@@ -42,12 +45,12 @@ in your library, your own copy plays.
 ## 📋 Requirements
 
 - Docker.
-- A Plex server, or Jellyfin 10.9 or newer, that the addon can reach.
+- A Navidrome server (or another Subsonic-compatible server) that the addon
+  can reach.
+- A Navidrome user and password. A dedicated user with read access is enough.
 - HTTPS, which BitChord requires. Use a reverse proxy such as Caddy, Traefik
   or nginx, or a
   [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
-- For **Sign in with Plex**, the addon must reach `plex.tv`. Pasting a token
-  works without it.
 
 ## 🚀 Setup
 
@@ -90,9 +93,9 @@ in your library, your own copy plays.
    right away: until a password is set, anyone who opens the page can claim
    it.
 
-5. **Add a server**: pick Plex or Jellyfin, sign in or paste a token,
-   optionally pick a library, and save. The public URL is filled in from the
-   address you opened; change it on the page if it is wrong.
+5. **Add a server**: enter your Navidrome URL, username and password, test the
+   connection, optionally pick a library, and save. The public URL is filled
+   in from the address you opened; change it on the page if it is wrong.
 
 6. **Add it to BitChord.** Copy the link from the server's card. In
    BitChord, open **Sources**, add an addon, and paste it.
@@ -139,7 +142,7 @@ These optional environment variables are the only other settings:
 Each server's link looks like this:
 
 ```
-https://music.example.com/plex-1/<secret>
+https://music.example.com/navidrome-1/<secret>
 ```
 
 Add one link per server under **Sources**. If an app asks for a manifest URL,
@@ -183,9 +186,9 @@ minute. Behind a proxy this pause applies to everyone.
 At the default level the addon logs searches, plays and setup changes:
 
 ```
-msg=search server=plex-1 source=plex q="timebomb all time low" returned=1 top="Time‐Bomb — All Time Low"
-msg=play server=plex-1 source=plex id=5820 track="Time‐Bomb — All Time Low" status=206 ended=complete
-msg="library indexed" server=plex-1 source=plex tracks=8697 added=12 removed=0
+msg=search server=navidrome-1 source=navidrome q="timebomb all time low" returned=1 top="Time‐Bomb — All Time Low"
+msg=play server=navidrome-1 source=navidrome id=5820 track="Time‐Bomb — All Time Low" status=206 ended=complete
+msg="library indexed" server=navidrome-1 source=navidrome tracks=8697 added=12 removed=0
 ```
 
 A `search` with results but no `stream` after it means BitChord decided the
@@ -203,16 +206,15 @@ server. Passwords, tokens and the secret are never logged.
 | The setup page asks for a password I never set | Someone else got there first. Delete the `admin` entry in `/data/addon.json` and restart           |
 | My servers are gone after an update          | The `/data` volume is missing or changed. Check `compose.yml`                                      |
 | Log says `cannot open the data file`         | The addon can't write `/data`, or `addon.json` is broken. Fix the folder owner or the file         |
-| Log says Plex or Jellyfin rejected the token | The token was revoked. Edit the server on the setup page and sign in again                         |
-| Sign in with Plex can't reach plex.tv        | Paste a token instead                                                                             |
+| Log says Navidrome rejected the credentials  | The username or password is wrong or changed. Edit the server on the setup page and save it again  |
 | A server shows as unreachable                | Enter an address the container can reach, such as a Docker service name                           |
 | Search works but playback fails              | Your reverse proxy is buffering or timing out. See the reverse proxy notes                         |
 | A new album doesn't show up                  | Wait for the next refresh, or disable and re-enable the server on the setup page                  |
 
 ## 🗺️ Roadmap
 
-- **Emby** support.
-- **Navidrome** and other Subsonic-compatible servers.
+- **Emby** and **Plex** support.
+- Broader **Subsonic/OpenSubsonic** server coverage beyond Navidrome.
 
 ## 🧑‍💻 Development
 
@@ -221,8 +223,8 @@ go test -race ./...
 gofmt -l . && go vet ./...
 ```
 
-Tests use fake Plex, Jellyfin and plex.tv servers in `internal/fakes`, so no
-real server is needed.
+Tests use a fake Navidrome (Subsonic) server in `internal/fakes`, so no real
+server is needed.
 
 ### Releasing
 

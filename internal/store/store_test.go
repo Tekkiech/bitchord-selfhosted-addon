@@ -19,8 +19,8 @@ func open(t *testing.T) *Store {
 	return s
 }
 
-func plexServer() Server {
-	return Server{Kind: Plex, Label: "Home", URL: "http://plex:32400", Token: "tok", Auth: AuthToken, Enabled: true}
+func navidromeServer() Server {
+	return Server{Kind: Navidrome, Label: "Home", URL: "http://navidrome:4533", Account: "lyle", Token: "pass", Auth: AuthPassword, Enabled: true}
 }
 
 func TestOpenCreatesTheFileWithASecretAndClientID(t *testing.T) {
@@ -69,7 +69,7 @@ func TestOpenNamesACorruptFile(t *testing.T) {
 }
 
 func TestOpenNamesAFileThatParsesButIsInvalid(t *testing.T) {
-	server := `{"slug":"plex-1","kind":"plex","url":"http://plex:32400","token":"t","auth":"token","enabled":true}`
+	server := `{"slug":"navidrome-1","kind":"navidrome","url":"http://navidrome:4533","account":"lyle","token":"t","auth":"password","enabled":true}`
 	cases := map[string]string{
 		"short secret":   `{"secret":"short","client_id":"c","servers":[]}`,
 		"repeated slug":  `{"secret":"abcdefghijklmnop","client_id":"c","servers":[` + server + `,` + server + `]}`,
@@ -96,11 +96,11 @@ func TestRoundTripAndAtomicWrite(t *testing.T) {
 	if err := s.SetPublicURL("https://music.example.com"); err != nil {
 		t.Fatal(err)
 	}
-	added, err := s.AddServer(plexServer())
+	added, err := s.AddServer(navidromeServer())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added.Slug != "plex-1" || added.Created.IsZero() || added.Created.Location() != time.UTC {
+	if added.Slug != "navidrome-1" || added.Created.IsZero() || added.Created.Location() != time.UTC {
 		t.Fatalf("added = %+v", added)
 	}
 	entries, _ := os.ReadDir(filepath.Dir(s.Path()))
@@ -127,13 +127,13 @@ func TestRoundTripAndAtomicWrite(t *testing.T) {
 
 func TestAFailedSaveLeavesTheFileAndTheMemoryUntouched(t *testing.T) {
 	s := open(t)
-	s.AddServer(plexServer())
+	s.AddServer(navidromeServer())
 	before, _ := os.ReadFile(s.Path())
 	if err := os.Chmod(filepath.Dir(s.Path()), 0o500); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(filepath.Dir(s.Path()), 0o700) })
-	if _, err := s.AddServer(plexServer()); err == nil {
+	if _, err := s.AddServer(navidromeServer()); err == nil {
 		t.Skip("directory is writable regardless of mode, likely running as root")
 	}
 	after, _ := os.ReadFile(s.Path())
@@ -147,49 +147,44 @@ func TestAFailedSaveLeavesTheFileAndTheMemoryUntouched(t *testing.T) {
 
 func TestSlugsFillTheLowestGapAndNeverRenumber(t *testing.T) {
 	s := open(t)
-	for range 3 {
-		if _, err := s.AddServer(plexServer()); err != nil {
+	for range 4 {
+		if _, err := s.AddServer(navidromeServer()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	jellyfin := plexServer()
-	jellyfin.Kind = Jellyfin
-	if added, _ := s.AddServer(jellyfin); added.Slug != "jellyfin-1" {
-		t.Errorf("first jellyfin slug = %q", added.Slug)
-	}
-	if err := s.RemoveServer("plex-2"); err != nil {
+	if err := s.RemoveServer("navidrome-2"); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Snapshot(); got.Servers[1].Slug != "plex-3" {
-		t.Errorf("plex-3 was renumbered: %+v", got.Servers)
+	if got := s.Snapshot(); got.Servers[1].Slug != "navidrome-3" {
+		t.Errorf("navidrome-3 was renumbered: %+v", got.Servers)
 	}
-	if added, _ := s.AddServer(plexServer()); added.Slug != "plex-2" {
+	if added, _ := s.AddServer(navidromeServer()); added.Slug != "navidrome-2" {
 		t.Errorf("gap not filled: %q", added.Slug)
 	}
-	if added, _ := s.AddServer(plexServer()); added.Slug != "plex-4" {
+	if added, _ := s.AddServer(navidromeServer()); added.Slug != "navidrome-5" {
 		t.Errorf("next slug = %q", added.Slug)
 	}
-	if err := s.RemoveServer("plex-9"); !errors.Is(err, ErrNoServer) {
+	if err := s.RemoveServer("navidrome-9"); !errors.Is(err, ErrNoServer) {
 		t.Errorf("removing an unknown slug: %v", err)
 	}
 }
 
 func TestUpdateServerKeepsSlugKindAndCreated(t *testing.T) {
 	s := open(t)
-	added, _ := s.AddServer(plexServer())
-	err := s.UpdateServer("plex-1", func(server *Server) error {
-		server.Slug, server.Kind, server.Created = "plex-9", Jellyfin, time.Time{}
+	added, _ := s.AddServer(navidromeServer())
+	err := s.UpdateServer("navidrome-1", func(server *Server) error {
+		server.Slug, server.Kind, server.Created = "navidrome-9", "emby", time.Time{}
 		server.Label, server.Enabled = "Parents", false
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.Snapshot().Server("plex-1")
-	if got.Slug != "plex-1" || got.Kind != Plex || !got.Created.Equal(added.Created) || got.Label != "Parents" || got.Enabled {
+	got, _ := s.Snapshot().Server("navidrome-1")
+	if got.Slug != "navidrome-1" || got.Kind != Navidrome || !got.Created.Equal(added.Created) || got.Label != "Parents" || got.Enabled {
 		t.Fatalf("updated = %+v", got)
 	}
-	if err := s.UpdateServer("plex-2", func(*Server) error { return nil }); !errors.Is(err, ErrNoServer) {
+	if err := s.UpdateServer("navidrome-2", func(*Server) error { return nil }); !errors.Is(err, ErrNoServer) {
 		t.Errorf("unknown slug: %v", err)
 	}
 }
@@ -219,18 +214,18 @@ func TestValidation(t *testing.T) {
 		change func(*Server)
 		want   string
 	}{
-		"bad url":          {func(v *Server) { v.URL = "plex:32400" }, "http or https"},
-		"no token":         {func(v *Server) { v.Token = "" }, "token or API key is required"},
+		"bad url":          {func(v *Server) { v.URL = "navidrome:4533" }, "http or https"},
+		"no username":      {func(v *Server) { v.Account = "" }, "a username is required"},
+		"no password":      {func(v *Server) { v.Token = "" }, "a password is required"},
 		"unknown kind":     {func(v *Server) { v.Kind = "emby" }, `unknown server kind "emby"`},
 		"unknown auth":     {func(v *Server) { v.Auth = "magic" }, `unknown auth "magic"`},
-		"auth kind clash":  {func(v *Server) { v.Auth = AuthJellyfinSignIn }, "only a Jellyfin server"},
 		"label too long":   {func(v *Server) { v.Label = strings.Repeat("é", 17) }, "at most 16 characters"},
 		"label at the cap": {func(v *Server) { v.Label = strings.Repeat("é", 16) }, ""},
 		"empty label":      {func(v *Server) { v.Label = "" }, ""},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			server := plexServer()
+			server := navidromeServer()
 			tc.change(&server)
 			_, err := s.AddServer(server)
 			switch {
@@ -259,19 +254,19 @@ func TestValidation(t *testing.T) {
 func TestOrderedSortsByCreationThenSlug(t *testing.T) {
 	now := time.Now()
 	snap := Snapshot{Servers: []Server{
-		{Slug: "plex-2", Created: now.Add(time.Minute)},
-		{Slug: "jellyfin-1", Created: now},
-		{Slug: "plex-1", Created: now},
+		{Slug: "navidrome-2", Created: now.Add(time.Minute)},
+		{Slug: "navidrome-3", Created: now},
+		{Slug: "navidrome-1", Created: now},
 	}}
 	got := snap.Ordered()
-	if got[0].Slug != "jellyfin-1" || got[1].Slug != "plex-1" || got[2].Slug != "plex-2" {
+	if got[0].Slug != "navidrome-1" || got[1].Slug != "navidrome-3" || got[2].Slug != "navidrome-2" {
 		t.Fatalf("Ordered = %+v", got)
 	}
 }
 
 func TestSnapshotDoesNotWaitForAnUpdate(t *testing.T) {
 	s := open(t)
-	s.AddServer(plexServer())
+	s.AddServer(navidromeServer())
 	entered, release := make(chan struct{}), make(chan struct{})
 	updated := make(chan error)
 	go func() {

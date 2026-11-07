@@ -25,18 +25,17 @@ const FileName = "addon.json"
 type Kind string
 
 const (
-	Plex     Kind = "plex"
-	Jellyfin Kind = "jellyfin"
+	Navidrome Kind = "navidrome"
 )
 
-var Kinds = []Kind{Plex, Jellyfin}
+var Kinds = []Kind{Navidrome}
 
 type Auth string
 
 const (
-	AuthToken          Auth = "token"
-	AuthPlexSignIn     Auth = "plex-signin"
-	AuthJellyfinSignIn Auth = "jellyfin-signin"
+	// AuthPassword stores a Navidrome username and password; the adapter
+	// turns them into a salted Subsonic token on every request.
+	AuthPassword Auth = "password"
 )
 
 type Server struct {
@@ -47,7 +46,6 @@ type Server struct {
 	Token       string    `json:"token"`
 	Auth        Auth      `json:"auth"`
 	Account     string    `json:"account"`
-	DeviceID    string    `json:"device_id,omitempty"`
 	Library     string    `json:"library"`
 	LibraryName string    `json:"library_name,omitempty"`
 	Enabled     bool      `json:"enabled"`
@@ -244,7 +242,7 @@ func (s *Store) SetAdmin(admin *Admin) error {
 
 var ErrNoServer = errors.New("no such server")
 
-var slugPattern = regexp.MustCompile(`^(plex|jellyfin)-[1-9][0-9]*$`)
+var slugPattern = regexp.MustCompile(`^navidrome-[1-9][0-9]*$`)
 
 func nextSlug(kind Kind, servers []Server) string {
 	taken := map[string]bool{}

@@ -56,7 +56,7 @@ func ValidatePublicURL(raw string) error {
 func ValidateServerURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("server URL must be an http or https URL such as http://plex:32400")
+		return errors.New("server URL must be an http or https URL such as http://navidrome:4533")
 	}
 	return nil
 }
@@ -73,19 +73,14 @@ func ValidateServer(server Server) error {
 	if err := ValidateServerURL(server.URL); err != nil {
 		problems = append(problems, err)
 	}
+	if server.Account == "" {
+		problems = append(problems, errors.New("a username is required"))
+	}
 	if server.Token == "" {
-		problems = append(problems, errors.New("a token or API key is required"))
+		problems = append(problems, errors.New("a password is required"))
 	}
 	switch server.Auth {
-	case AuthToken:
-	case AuthPlexSignIn:
-		if server.Kind != Plex {
-			problems = append(problems, errors.New("only a Plex server can be signed in with Plex"))
-		}
-	case AuthJellyfinSignIn:
-		if server.Kind != Jellyfin {
-			problems = append(problems, errors.New("only a Jellyfin server can be signed in with a Jellyfin account"))
-		}
+	case AuthPassword:
 	default:
 		problems = append(problems, fmt.Errorf("unknown auth %q", server.Auth))
 	}

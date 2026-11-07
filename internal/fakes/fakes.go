@@ -93,3 +93,11 @@ func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(value)
 }
+
+func jsonOf(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}

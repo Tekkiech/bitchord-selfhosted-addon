@@ -42,7 +42,7 @@ type kindOption struct {
 	Name string
 }
 
-var kindOptions = []kindOption{{store.Plex, "Plex"}, {store.Jellyfin, "Jellyfin"}}
+var kindOptions = []kindOption{{store.Navidrome, "Navidrome"}}
 
 func kindName(kind store.Kind) string {
 	for _, option := range kindOptions {
@@ -119,7 +119,7 @@ type serverFormView struct {
 }
 
 func (a *app) formView(r *http.Request, title string) serverFormView {
-	return serverFormView{page: a.page(r, title), Kind: store.Plex, KindName: "Plex", Enabled: true, Kinds: kindOptions, Action: "/setup/servers", Auth: store.AuthToken}
+	return serverFormView{page: a.page(r, title), Kind: store.Navidrome, KindName: "Navidrome", Enabled: true, Kinds: kindOptions, Action: "/setup/servers", Auth: store.AuthPassword}
 }
 
 func hostOf(raw string) string {

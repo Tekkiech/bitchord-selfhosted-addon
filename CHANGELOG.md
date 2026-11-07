@@ -6,6 +6,21 @@ Entries are written **one line per paragraph and bullet** (no hard-wrapping) so 
 
 ## [Unreleased]
 
+**Breaking:** the addon now works exclusively with Navidrome (and other Subsonic/OpenSubsonic-compatible servers). Plex and Jellyfin support has been removed. Delete your existing servers and add your Navidrome server again; every BitChord URL changes because server ids are now `navidrome-1`, `navidrome-2` and so on.
+
+### Added
+
+- Navidrome support over the Subsonic API. Add a server with its URL, a Navidrome username and a password; the connection test lists the server's music libraries. Original files are streamed with `format=raw` (no transcoding) and byte-range seeking.
+
+### Changed
+
+- Credentials are a Navidrome username and password. The password is stored so the addon can authenticate, but it never leaves the addon as plaintext: each request carries only the Subsonic salted token `md5(password + salt)`. The setup form has a single username/password pair instead of the old sign-in/paste-a-token tabs.
+- Server ids and the name shown in BitChord use `Navidrome`, e.g. `navidrome-1` and `Navidrome - Home`.
+
+### Removed
+
+- Plex and Jellyfin backends, the "Sign in with Plex" and Jellyfin sign-in flows, and the background session sign-out they needed. The Subsonic API has no server-side session for the addon to revoke.
+
 ## [1.1.0] - 2026-09-27
 
 ### Changed
